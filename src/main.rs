@@ -3,35 +3,38 @@ use std::{
     fs,
     net::SocketAddr,
     path::PathBuf,
+    process,
     sync::{Arc, Mutex},
+    thread,
     time::Duration,
 };
 
+use tokio::time;
 use hyper::{
     header::{HeaderValue, SET_COOKIE},
     Body, Request, Response, Server, StatusCode,
 };
 use hyper::service::{make_service_fn, service_fn};
 use reqwest::header::HeaderMap;
-use tokio::{task, time};
 use wry::{
     application::{
         dpi::LogicalSize,
-        event::{Event, StartCause, WindowEvent},
+        event::{Event, WindowEvent},
         event_loop::{ControlFlow, EventLoop},
         window::WindowBuilder,
     },
+    webview::WebView,
     webview::WebViewBuilder,
 };
 
-// Подключаем модуль idex, который находится в файле src/idex.rs
 mod idex;
 use idex::run_idex;
 
-// ============================
-// Structures for cookies
-// ============================
+// Подключаем модуль telegram.rs
+mod telegram;
+use telegram::show_telegram;
 
+// Работа с куками для прокси
 #[derive(serde::Serialize, serde::Deserialize, Debug, Default, Clone)]
 struct CookieStore {
     cookies: Vec<Cookie>,
@@ -43,7 +46,6 @@ struct Cookie {
     value: String,
     domain: String,
     path: String,
-    // поля в snake_case
     expiration_date: Option<f64>,
     host_only: Option<bool>,
     http_only: Option<bool>,
@@ -70,10 +72,7 @@ fn load_cookies() -> std::io::Result<CookieStore> {
     }
 }
 
-// ============================
-// Proxy state
-// ============================
-
+/// Прокси-состояние
 #[derive(Clone)]
 pub struct ProxyState {
     pub cookies: Arc<Mutex<CookieStore>>,
@@ -89,7 +88,6 @@ impl ProxyState {
         }
     }
 
-    /// Обновляет хранилище cookie на основе заголовков ответа.
     pub fn update_from_headers(&self, headers: &HeaderMap<HeaderValue>, domain: &str) {
         let new_cookies: Vec<Cookie> = headers
             .get_all(SET_COOKIE)
@@ -137,9 +135,7 @@ impl ProxyState {
     }
 }
 
-/// Прокси-обработчик: ретранслирует все HTTP-запросы.
-/// Если путь запроса содержит абсолютный URL — используется он, иначе URL строится относительно base_url.
-/// Для запросов к panel.gate.cx переписывается заголовок Host и добавляются сохранённые Cookie.
+/// Прокси-обработчик: ретранслирует HTTP-запросы.
 async fn proxy_handler(
     req: Request<Body>,
     state: ProxyState,
@@ -152,10 +148,12 @@ async fn proxy_handler(
         match url::Url::parse(req_path) {
             Ok(url) => url,
             Err(e) => {
-                return Ok(Response::builder()
-                    .status(StatusCode::BAD_REQUEST)
-                    .body(Body::from(format!("Invalid URL: {}", e)))
-                    .unwrap());
+                return Ok(
+                    Response::builder()
+                        .status(StatusCode::BAD_REQUEST)
+                        .body(Body::from(format!("Invalid URL: {}", e)))
+                        .unwrap(),
+                );
             }
         }
     } else {
@@ -163,10 +161,12 @@ async fn proxy_handler(
         match base.join(req.uri().path()) {
             Ok(url) => url,
             Err(e) => {
-                return Ok(Response::builder()
-                    .status(StatusCode::BAD_REQUEST)
-                    .body(Body::from(format!("URL join error: {}", e)))
-                    .unwrap());
+                return Ok(
+                    Response::builder()
+                        .status(StatusCode::BAD_REQUEST)
+                        .body(Body::from(format!("URL join error: {}", e)))
+                        .unwrap(),
+                );
             }
         }
     };
@@ -201,10 +201,12 @@ async fn proxy_handler(
     let response = match request_builder.send().await {
         Ok(resp) => resp,
         Err(err) => {
-            return Ok(Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Body::from(format!("Request error: {}", err)))
-                .unwrap());
+            return Ok(
+                Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(Body::from(format!("Request error: {}", err)))
+                    .unwrap(),
+            );
         }
     };
     let status = response.status();
@@ -212,10 +214,12 @@ async fn proxy_handler(
     let body_bytes = match response.bytes().await {
         Ok(b) => b,
         Err(err) => {
-            return Ok(Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Body::from(format!("Body error: {}", err)))
-                .unwrap());
+            return Ok(
+                Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(Body::from(format!("Body error: {}", err)))
+                    .unwrap(),
+            );
         }
     };
 
@@ -235,9 +239,12 @@ async fn run_proxy(state: ProxyState, addr: SocketAddr) {
     let make_service = make_service_fn(move |_| {
         let state = state.clone();
         async move {
-            Ok::<_, Infallible>(service_fn(move |req| proxy_handler(req, state.clone())))
+            Ok::<_, Infallible>(service_fn(move |req| {
+                proxy_handler(req, state.clone())
+            }))
         }
     });
+
     let server = Server::bind(&addr).serve(make_service);
     println!("Proxy server listening on http://{}", addr);
     if let Err(e) = server.await {
@@ -245,57 +252,217 @@ async fn run_proxy(state: ProxyState, addr: SocketAddr) {
     }
 }
 
-#[tokio::main(flavor = "multi_thread")]
-async fn main() -> wry::Result<()> {
-    let target_site = "https://panel.gate.cx/".to_string();
-    let proxy_addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-    let proxy_state = ProxyState::new(target_site.clone());
-    let state_for_proxy = proxy_state.clone();
-    task::spawn(async move {
-        run_proxy(state_for_proxy, proxy_addr).await;
-    });
-    // Запускаем модуль транзакций (idex) в отдельном таске.
-    let state_for_tx = proxy_state.clone();
-    task::spawn(async move {
-        run_idex(state_for_tx).await;
-    });
-    time::sleep(Duration::from_secs(1)).await;
-    let proxy_url = format!("http://{}/{}", proxy_addr, target_site);
-    let event_loop = wry::application::event_loop::EventLoop::new();
-    let window = WindowBuilder::new()
-        .with_title("IDEX")
-        .with_inner_size(LogicalSize::new(1024.0, 768.0))
-        .build(&event_loop)?;
-    let initial_cookies = {
-        let store = load_cookies().unwrap_or_default();
-        store.cookies
-    };
-    let cookie_script = initial_cookies
-        .iter()
-        .map(|c| format!("document.cookie = '{}={}; path={}';", c.name, c.value, c.path))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let webview = WebViewBuilder::new(window)?
-        .with_url(&proxy_url)?
-        .with_initialization_script(&cookie_script)
-        .with_initialization_script(
-            r#"
-            document.addEventListener('contextmenu', event => {
-                event.preventDefault();
+/// Команды для event loop.
+#[derive(Debug)]
+enum Command {
+    ShowIdex,
+    ShowTelegram,
+    Exit,
+}
+
+/// Общая структура для хранения глобального состояния окон
+struct AppState {
+    idex_webview: Option<WebView>,
+    telegram_webview: Option<WebView>,
+}
+
+impl AppState {
+    fn new() -> Self {
+        Self {
+            idex_webview: None,
+            telegram_webview: None,
+        }
+    }
+}
+
+fn main() -> wry::Result<()> {
+    // --- Запуск Tokio runtime в отдельном потоке для асинхронных задач ---
+    let rt = Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("Не удалось создать Tokio runtime"),
+    );
+    {
+        let rt_clone = rt.clone();
+        thread::spawn(move || {
+            rt_clone.block_on(async {
+                let target_site = "https://panel.gate.cx/".to_string();
+                let proxy_addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+                let proxy_state = ProxyState::new(target_site.clone());
+
+                // Запускаем прокси
+                tokio::spawn(run_proxy(proxy_state.clone(), proxy_addr));
+
+                // Запускаем модуль транзакций (IDEX)
+                tokio::spawn(run_idex(proxy_state));
+
+                // Бесконечный цикл, чтобы runtime не завершился
+                loop {
+                    time::sleep(Duration::from_secs(1)).await;
+                }
             });
-        "#,
-        )
-        .with_ipc_handler(|_window, message: String| {
-            println!("Received IPC message: {}", message);
-        })
-        .build()?;
-    webview.evaluate_script(&cookie_script)?;
-    event_loop.run(move |event, _, control_flow| {
-        *control_flow = wry::application::event_loop::ControlFlow::Wait;
+        });
+    }
+
+    // --- Создание главного event loop с пользовательскими командами ---
+    let event_loop = EventLoop::<Command>::with_user_event();
+    let proxy_event = event_loop.create_proxy();
+
+    // Создаём глобальное состояние для хранения webview окон
+    let app_state = Arc::new(Mutex::new(AppState::new()));
+
+    // Отправляем команды на автоматическое открытие обоих окон по запуску.
+    {
+        let proxy_clone = proxy_event.clone();
+        thread::spawn(move || {
+            // Немного задержки перед отправкой команд
+            thread::sleep(Duration::from_millis(100));
+            proxy_clone
+                .send_event(Command::ShowIdex)
+                .expect("Send failed");
+            proxy_clone
+                .send_event(Command::ShowTelegram)
+                .expect("Send failed");
+        });
+    }
+
+    // --- Запуск системного трея ---
+    let tray_proxy = proxy_event.clone();
+    thread::spawn(move || {
+        let mut tray = systray::Application::new().expect("Не удалось создать трей-приложение");
+        tray.set_icon_from_file("icon.ico")
+            .expect("Не удалось установить иконку");
+
+        // Добавляем обработчики для каждого пункта меню
+        {
+            let proxy = tray_proxy.clone();
+            tray.add_menu_item("Показать IDEX", move |_| {
+                println!("Tray: Показать IDEX");
+                proxy.send_event(Command::ShowIdex).expect("Send failed");
+                Ok::<(), systray::Error>(())
+            })
+            .unwrap();
+        }
+
+        {
+            let proxy = tray_proxy.clone();
+            tray.add_menu_item("Показать Telegram", move |_| {
+                println!("Tray: Показать Telegram");
+                proxy.send_event(Command::ShowTelegram).expect("Send failed");
+                Ok::<(), systray::Error>(())
+            })
+            .unwrap();
+        }
+
+        {
+            let proxy = tray_proxy.clone();
+            tray.add_menu_item("Выйти", move |_| {
+                println!("Tray: Выход");
+                proxy.send_event(Command::Exit).expect("Send failed");
+                Ok::<(), systray::Error>(())
+            })
+            .unwrap();
+        }
+
+        tray.wait_for_message().expect("Ошибка в цикле обработки трея");
+    });
+
+    // --- Запуск главного event loop ---
+    event_loop.run(move |event, target, control_flow| {
+        *control_flow = ControlFlow::Wait;
         match event {
-            Event::NewEvents(StartCause::Init) => println!("Приложение инициализировано"),
-            Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
-                *control_flow = wry::application::event_loop::ControlFlow::Exit
+            Event::UserEvent(cmd) => match cmd {
+                Command::ShowIdex => {
+                    let mut state = app_state.lock().unwrap();
+                    // Если окно IDEX ещё не открыто, создаём его
+                    if state.idex_webview.is_none() {
+                        let window = WindowBuilder::new()
+                            .with_title("IDEX")
+                            .with_inner_size(LogicalSize::new(1024.0, 768.0))
+                            .build(target)
+                            .expect("Не удалось создать окно IDEX");
+
+                        let initial_cookies =
+                            load_cookies().unwrap_or_default().cookies;
+                        let cookie_script = initial_cookies
+                            .iter()
+                            .map(|c| {
+                                format!(
+                                    "document.cookie = '{}={}; path={}';",
+                                    c.name, c.value, c.path
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+
+                        let proxy_url = format!(
+                            "http://{}/{}",
+                            "127.0.0.1:8080", "https://panel.gate.cx/"
+                        );
+                        let webview = WebViewBuilder::new(window)
+                            .expect("Ошибка создания webview")
+                            .with_url(&proxy_url)
+                            .expect("Не удалось загрузить URL")
+                            .with_initialization_script(&cookie_script)
+                            .with_initialization_script(
+                                r#"
+                                document.addEventListener('contextmenu', event => {
+                                    event.preventDefault();
+                                });
+                                "#,
+                            )
+                            .build()
+                            .expect("Ошибка сборки webview");
+
+                        // Сохраняем webview в global state, чтобы он не был уничтожен
+                        state.idex_webview = Some(webview);
+                        println!("Открыт IDEX");
+                    }
+                }
+                Command::ShowTelegram => {
+                    let mut state = app_state.lock().unwrap();
+                    if state.telegram_webview.is_none() {
+                        // Функция show_telegram должна возвращать Result<WebView, wry::Error>
+                        match show_telegram(target) {
+                            Ok(tv) => {
+                                state.telegram_webview = Some(tv);
+                                println!("Открыт Telegram");
+                            }
+                            Err(e) => {
+                                eprintln!("Ошибка при открытии Telegram: {:#?}", e);
+                            }
+                        }
+                    }
+                }
+                Command::Exit => {
+                    println!("Завершение работы приложения...");
+                    // Очищаем все окна перед выходом
+                    let mut state = app_state.lock().unwrap();
+                    state.idex_webview = None;
+                    state.telegram_webview = None;
+                    // Принудительно завершаем процесс после очистки
+                    process::exit(0);
+                }
+            },
+            Event::WindowEvent {
+                event: WindowEvent::CloseRequested,
+                window_id,
+                ..
+            } => {
+                println!("Окно закрыто: {:?}", window_id);
+                // Очищаем состояние окна при его закрытии
+                let mut state = app_state.lock().unwrap();
+                if let Some(ref webview) = state.idex_webview {
+                    if webview.window().id() == window_id {
+                        state.idex_webview = None;
+                    }
+                }
+                if let Some(ref webview) = state.telegram_webview {
+                    if webview.window().id() == window_id {
+                        state.telegram_webview = None;
+                    }
+                }
             }
             _ => (),
         }
