@@ -1,0 +1,30 @@
+{
+  "cookies": [
+    {
+      "name": "sid",
+      "value": "eyJpdiI6IldsNzdyL1dpb2ZkU3ovZ2RXV1ZEbnc9PSIsInZhbHVlIjoiMFZ6S0dLODNnTXRFWGhQdFRQSnJEam13NlkvWWwxZ1c4MTFrNWd2dkkvT1pCTUdxbUVsWmt1U2VFUFlQNWxDaFlncHF2TFpiTC94eElTQ1BSbzBBNW1LV3V0eUNkaW5zODlOaTVhTnBuMGc9IiwibWFjIjoiM2RiY2E4NWY5N2E0NDcyYWM3NmU0Yjc4YjU0MWU1ZjVhMDA0YzgzYjY2ZGU1NDk2NDY5Nzc1NDYwNjEwYjYwZSIsInRhZyI6IiJ9",
+      "domain": "panel.gate.cx",
+      "path": "/",
+      "expiration_date": null,
+      "host_only": null,
+      "http_only": true,
+      "same_site": null,
+      "secure": true,
+      "session": null,
+      "store_id": null
+    },
+    {
+      "name": "rsid",
+      "value": "eyJpdiI6IlNaL2VCeDl0MFF0ZW5KRUVKVEovVlE9PSIsInZhbHVlIjoiWFh0ODlDT3JXcHFFYTIzeUZvcERsb1ZiOUZzeGI0clg0cW9IekhSU1VXQWVMQUgrZ29SZjBaSjdWL0trQk9udTRUait3NnBVQi9PVzM1UzhoMDJQWmttUzFvWlQ0aUYvYUk2UXMvNHE4Z1E9IiwibWFjIjoiN2Q5ZTEwMThjODlmZmRiMTQ3NmVmMjQ2NmViZGI3NWM2NmRhNzZjYzQzYjI4NzAyNGM2OTMzZDVhMTg0NTAwYiIsInRhZyI6IiJ9",
+      "domain": "panel.gate.cx",
+      "path": "/",
+      "expiration_date": null,
+      "host_only": null,
+      "http_only": true,
+      "same_site": null,
+      "secure": true,
+      "session": null,
+      "store_id": null
+    }
+  ]
+}
