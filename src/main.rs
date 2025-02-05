@@ -1,12 +1,13 @@
 use std::{
-    convert::Infallible,
     fs,
+    io::{self, Write},
     net::SocketAddr,
     path::PathBuf,
     process,
     sync::{Arc, Mutex},
     thread,
     time::Duration,
+    convert::Infallible,
 };
 
 use tokio::time;
@@ -30,11 +31,9 @@ use wry::{
 mod idex;
 use idex::run_idex;
 
-// Подключаем модуль telegram.rs
-mod telegram;
-use telegram::show_telegram;
-
+// -----------------------------
 // Работа с куками для прокси
+// -----------------------------
 #[derive(serde::Serialize, serde::Deserialize, Debug, Default, Clone)]
 struct CookieStore {
     cookies: Vec<Cookie>,
@@ -72,7 +71,9 @@ fn load_cookies() -> std::io::Result<CookieStore> {
     }
 }
 
-/// Прокси-состояние
+// -----------------------------
+// Прокси-состояние
+// -----------------------------
 #[derive(Clone)]
 pub struct ProxyState {
     pub cookies: Arc<Mutex<CookieStore>>,
@@ -135,7 +136,9 @@ impl ProxyState {
     }
 }
 
-/// Прокси-обработчик: ретранслирует HTTP-запросы.
+// -----------------------------
+// Прокси-обработчик
+// -----------------------------
 async fn proxy_handler(
     req: Request<Body>,
     state: ProxyState,
@@ -252,37 +255,125 @@ async fn run_proxy(state: ProxyState, addr: SocketAddr) {
     }
 }
 
-/// Команды для event loop.
+// -----------------------------
+// Команды для event loop.
+// -----------------------------
 #[derive(Debug)]
 enum Command {
     ShowIdex,
-    ShowTelegram,
     Exit,
 }
 
-/// Общая структура для хранения глобального состояния окон
+// -----------------------------
+// Глобальное состояние окон. 
+// -----------------------------
 struct AppState {
     idex_webview: Option<WebView>,
-    telegram_webview: Option<WebView>,
 }
 
 impl AppState {
     fn new() -> Self {
-        Self {
-            idex_webview: None,
-            telegram_webview: None,
+        Self { idex_webview: None }
+    }
+}
+
+// -----------------------------
+// Функция для проверки токена через API.
+// -----------------------------
+async fn verify_device_token(api_url: &str, device_token: &str) -> bool {
+    let client = reqwest::Client::new();
+    let payload = serde_json::json!({ "deviceToken": device_token });
+    match client.post(api_url).json(&payload).send().await {
+        Ok(resp) => {
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                // Если сервер вернул поле valid: true — токен валиден.
+                json.get("valid").and_then(|v| v.as_bool()) == Some(true)
+            } else {
+                false
+            }
+        }
+        Err(err) => {
+            eprintln!("Ошибка запроса проверки токена: {}", err);
+            false
         }
     }
 }
 
+// -----------------------------
+// Функция для ввода токена через консоль.
+// -----------------------------
+fn ask_token_from_console() -> String {
+    print!("Введите Device Token: ");
+    io::stdout().flush().unwrap();
+    let mut token = String::new();
+    io::stdin()
+        .read_line(&mut token)
+        .expect("Ошибка чтения из консоли");
+    token.trim().to_string()
+}
+
+// -----------------------------
+// Main
+// -----------------------------
 fn main() -> wry::Result<()> {
-    // --- Запуск Tokio runtime в отдельном потоке для асинхронных задач ---
+    // Создаем Tokio runtime.
     let rt = Arc::new(
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .expect("Не удалось создать Tokio runtime"),
     );
+
+    // Определяем URL API для проверки токена.
+    #[cfg(debug_assertions)]
+    let token_api_url = "http://localhost/api/deviceToken".to_string();
+    #[cfg(not(debug_assertions))]
+    let token_api_url = "https://p2pp.vercel.app/api/deviceToken".to_string();
+
+    // Проверка токена: если файла нет или токен не валиден, запрашиваем ввод через консоль.
+    let device_token_path = PathBuf::from("device.token");
+    let mut device_token = String::new();
+    let token_valid = if device_token_path.exists() {
+        match fs::read_to_string(&device_token_path) {
+            Ok(token) => {
+                device_token = token.trim().to_string();
+                rt.block_on(verify_device_token(&token_api_url, &device_token))
+            }
+            Err(e) => {
+                eprintln!("Ошибка чтения device.token: {}", e);
+                false
+            }
+        }
+    } else {
+        false
+    };
+
+    if !token_valid {
+        println!("Device token отсутствует или не валиден.");
+        loop {
+            let input_token = ask_token_from_console();
+            if input_token.is_empty() {
+                eprintln!("Токен не введён, завершение работы.");
+                process::exit(1);
+            }
+            let validated = rt.block_on(verify_device_token(&token_api_url, &input_token));
+            if validated {
+                device_token = input_token.clone();
+                if let Err(e) = fs::write(&device_token_path, &device_token) {
+                    eprintln!("Ошибка записи device.token: {}", e);
+                    process::exit(1);
+                }
+                println!("Device token подтвержден и сохранен.");
+                break;
+            } else {
+                eprintln!("Получен невалидный токен, попробуйте снова.");
+            }
+        }
+    } else {
+        println!("Device token существует и валиден.");
+    }
+
+    // Запуск Tokio runtime для асинхронных задач.
     {
         let rt_clone = rt.clone();
         thread::spawn(move || {
@@ -291,13 +382,13 @@ fn main() -> wry::Result<()> {
                 let proxy_addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
                 let proxy_state = ProxyState::new(target_site.clone());
 
-                // Запускаем прокси
+                // Запускаем прокси.
                 tokio::spawn(run_proxy(proxy_state.clone(), proxy_addr));
 
-                // Запускаем модуль транзакций (IDEX)
+                // Запускаем модуль транзакций (IDEX).
                 tokio::spawn(run_idex(proxy_state));
 
-                // Бесконечный цикл, чтобы runtime не завершился
+                // Чтобы runtime не завершился.
                 loop {
                     time::sleep(Duration::from_secs(1)).await;
                 }
@@ -305,77 +396,31 @@ fn main() -> wry::Result<()> {
         });
     }
 
-    // --- Создание главного event loop с пользовательскими командами ---
+    // Создаем event loop для пользовательских команд.
     let event_loop = EventLoop::<Command>::with_user_event();
     let proxy_event = event_loop.create_proxy();
 
-    // Создаём глобальное состояние для хранения webview окон
+    // Глобальное состояние для окон.
     let app_state = Arc::new(Mutex::new(AppState::new()));
 
-    // Отправляем команды на автоматическое открытие обоих окон по запуску.
+    // Автоматически открываем окно IDEX.
     {
         let proxy_clone = proxy_event.clone();
         thread::spawn(move || {
-            // Немного задержки перед отправкой команд
             thread::sleep(Duration::from_millis(100));
             proxy_clone
                 .send_event(Command::ShowIdex)
                 .expect("Send failed");
-            proxy_clone
-                .send_event(Command::ShowTelegram)
-                .expect("Send failed");
         });
     }
 
-    // --- Запуск системного трея ---
-    let tray_proxy = proxy_event.clone();
-    thread::spawn(move || {
-        let mut tray = systray::Application::new().expect("Не удалось создать трей-приложение");
-        tray.set_icon_from_file("icon.ico")
-            .expect("Не удалось установить иконку");
-
-        // Добавляем обработчики для каждого пункта меню
-        {
-            let proxy = tray_proxy.clone();
-            tray.add_menu_item("Показать IDEX", move |_| {
-                println!("Tray: Показать IDEX");
-                proxy.send_event(Command::ShowIdex).expect("Send failed");
-                Ok::<(), systray::Error>(())
-            })
-            .unwrap();
-        }
-
-        {
-            let proxy = tray_proxy.clone();
-            tray.add_menu_item("Показать Telegram", move |_| {
-                println!("Tray: Показать Telegram");
-                proxy.send_event(Command::ShowTelegram).expect("Send failed");
-                Ok::<(), systray::Error>(())
-            })
-            .unwrap();
-        }
-
-        {
-            let proxy = tray_proxy.clone();
-            tray.add_menu_item("Выйти", move |_| {
-                println!("Tray: Выход");
-                proxy.send_event(Command::Exit).expect("Send failed");
-                Ok::<(), systray::Error>(())
-            })
-            .unwrap();
-        }
-
-        tray.wait_for_message().expect("Ошибка в цикле обработки трея");
-    });
-
-    // --- Запуск главного event loop ---
+    // Основной event loop.
     event_loop.run(move |event, target, control_flow| {
         *control_flow = ControlFlow::Wait;
         match event {
             Event::UserEvent(cmd) => match cmd {
                 Command::ShowIdex => {
                     let mut state = app_state.lock().unwrap();
-                    // Если окно IDEX ещё не открыто, создаём его
                     if state.idex_webview.is_none() {
                         let window = WindowBuilder::new()
                             .with_title("IDEX")
@@ -415,33 +460,14 @@ fn main() -> wry::Result<()> {
                             .build()
                             .expect("Ошибка сборки webview");
 
-                        // Сохраняем webview в global state, чтобы он не был уничтожен
                         state.idex_webview = Some(webview);
                         println!("Открыт IDEX");
                     }
                 }
-                Command::ShowTelegram => {
-                    let mut state = app_state.lock().unwrap();
-                    if state.telegram_webview.is_none() {
-                        // Функция show_telegram должна возвращать Result<WebView, wry::Error>
-                        match show_telegram(target) {
-                            Ok(tv) => {
-                                state.telegram_webview = Some(tv);
-                                println!("Открыт Telegram");
-                            }
-                            Err(e) => {
-                                eprintln!("Ошибка при открытии Telegram: {:#?}", e);
-                            }
-                        }
-                    }
-                }
                 Command::Exit => {
                     println!("Завершение работы приложения...");
-                    // Очищаем все окна перед выходом
                     let mut state = app_state.lock().unwrap();
                     state.idex_webview = None;
-                    state.telegram_webview = None;
-                    // Принудительно завершаем процесс после очистки
                     process::exit(0);
                 }
             },
@@ -451,20 +477,14 @@ fn main() -> wry::Result<()> {
                 ..
             } => {
                 println!("Окно закрыто: {:?}", window_id);
-                // Очищаем состояние окна при его закрытии
                 let mut state = app_state.lock().unwrap();
                 if let Some(ref webview) = state.idex_webview {
                     if webview.window().id() == window_id {
                         state.idex_webview = None;
                     }
                 }
-                if let Some(ref webview) = state.telegram_webview {
-                    if webview.window().id() == window_id {
-                        state.telegram_webview = None;
-                    }
-                }
             }
-            _ => (),
+            _ => {}
         }
     });
 }

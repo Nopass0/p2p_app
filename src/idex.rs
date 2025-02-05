@@ -202,6 +202,18 @@ pub async fn run_idex(proxy_state: ProxyState) {
     let client = Client::new();
 
     loop {
+        // Проверяем наличие кук
+        let has_cookies = {
+            let store = proxy_state.cookies.lock().unwrap();
+            !store.cookies.is_empty()
+        };
+
+        if !has_cookies {
+            println!("No cookies found, waiting for cookies to be set...");
+            time::sleep(Duration::from_secs(5)).await;
+            continue;
+        }
+
         println!("Checking transactions...");
         let mut saved_tx = load_transactions();
         let mut saved_ids: HashSet<String> =
@@ -211,7 +223,6 @@ pub async fn run_idex(proxy_state: ProxyState) {
         // Проходим по страницам 1..=10
         for page in 1..=10 {
             let url = format!("{}{}", gate_api_url, page);
-            // println!("Fetching URL: {}", url);
             let mut req_builder = client.get(&url).header("User-Agent", user_agent);
 
             {
@@ -222,9 +233,7 @@ pub async fn run_idex(proxy_state: ProxyState) {
                     .map(|c| format!("{}={}", c.name, c.value))
                     .collect::<Vec<_>>()
                     .join("; ");
-                if !cookie_str.is_empty() {
-                    req_builder = req_builder.header("Cookie", cookie_str);
-                }
+                req_builder = req_builder.header("Cookie", cookie_str);
             }
 
             match req_builder.send().await {
