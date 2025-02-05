@@ -177,18 +177,20 @@ fn map_transaction(json: &Value) -> Option<Transaction> {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
-        trader_id: json
-            .get("trader")
-            .and_then(|t| t.get("id"))
-            .and_then(|v| v.as_str())
-            .map(String::from),
+        trader_id: json.get("trader")
+                    .and_then(|t| t.get("id"))
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v.to_string()),
         trader_name: json
             .get("trader")
             .and_then(|t| t.get("name"))
             .and_then(|v| v.as_str())
             .map(String::from),
         attachments: json.get("attachments").cloned(),
-        idex_id: None,
+        idex_id: json.get("trader")
+            .and_then(|t| t.get("id"))
+            .and_then(|v| v.as_u64())
+            .map(|v| v.to_string()),
     })
 }
 
@@ -209,7 +211,7 @@ pub async fn run_idex(proxy_state: ProxyState) {
         // Проходим по страницам 1..=10
         for page in 1..=10 {
             let url = format!("{}{}", gate_api_url, page);
-            println!("Fetching URL: {}", url);
+            // println!("Fetching URL: {}", url);
             let mut req_builder = client.get(&url).header("User-Agent", user_agent);
 
             {
@@ -232,8 +234,8 @@ pub async fn run_idex(proxy_state: ProxyState) {
                         .text()
                         .await
                         .unwrap_or_else(|e| format!("Error reading text: {}", e));
-                    println!("Response status: {}", status);
-                    println!("Response body: {}", text);
+                    // println!("Response status: {}", status);
+                    // println!("Response body: {}", text);
 
                     if status.is_success() {
                         let json: Value = match serde_json::from_str(&text) {
